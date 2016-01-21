@@ -1,0 +1,11 @@
+apply plugin: "scala"
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    compile "org.scala-lang:scala-library:2.11.7",
+            "com.typesafe.akka:akka-http-experimental_2.11:2.0.2",
+            "com.typesafe.akka:akka-http-spray-json-experimental_2.11:+"
+}
