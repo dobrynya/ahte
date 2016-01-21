@@ -28,7 +28,7 @@ case class Post(title: String, created: LocalDateTime, content: String, modified
   }
 }
 
-case class Comment(author: String, created: LocalDateTime, content: String, id: String = UUID.randomUUID().toString)
+case class Comment(author: String, title: String, content: String, created: LocalDateTime = LocalDateTime.now, id: String = UUID.randomUUID().toString)
 
 trait BlogStore {
   var blog = Blog("Dmitry's blog", "Dmitry")
@@ -48,13 +48,29 @@ trait BlogStore {
     post
   }
 
-  def updatePost(id: String, title: Option[String], content: Option[String]): Option[Post] = {
+  def updatePost(id: String, title: Option[String], content: Option[String]): Option[Post] =
     for (old <- posts.get(id))
-      yield {
-        val post = old.copy(title = title.getOrElse(old.title), content = content.getOrElse(old.content))
-        posts += post.id -> post
-        post
-      }
+    yield {
+      val post = old.copy(title = title.getOrElse(old.title), content = content.getOrElse(old.content))
+      posts += post.id -> post
+      post
+    }
+
+  def deleteComment(postId: String, commentId: String): Option[Comment] = {
+    for {
+      comments <- comments.get(postId)
+      (found, filtered) = comments.partition(_.id == commentId)
+      deletedComment <- found.headOption
+    } yield {
+      this.comments += postId -> filtered
+      deletedComment
+    }
+  }
+
+  def createComment(postId: String, author: String, title: String, content: String): Comment = {
+    val comment = Comment(author, title, content)
+    comments += postId -> (comment :: comments.getOrElse(postId, Nil))
+    comment
   }
 
   def deletePost(id: String): Option[Post] =
@@ -65,15 +81,16 @@ trait BlogStore {
 
   def postComments(id: String): Option[PostComments] =
     for (post <- posts.get(id))
-      yield PostComments(blog.name, blog.author, post.title, comments.getOrElse(id, Nil))
+    yield PostComments(blog.name, blog.author, post.title, comments.getOrElse(id, Nil).reverse)
 }
-
 
 case class BlogPosts(name: String, author: String, posts: List[Post])
 
 case class PostComments(blog: String, author: String, title: String, comments: List[Comment])
 
 case class PutPost(title: String, content: String)
+
+case class PutComment(title: String, content: String, author: String)
 
 case class PatchPost(title: Option[String], content: Option[String])
 
@@ -86,11 +103,12 @@ trait BlogProtocol extends SprayJsonSupport with DefaultJsonProtocol {
 
   implicit val blogFormat = jsonFormat2(Blog)
   implicit val postFormat = jsonFormat5(Post)
-  implicit val commentFormat = jsonFormat4(Comment)
+  implicit val commentFormat = jsonFormat5(Comment)
   implicit val postsFormat = jsonFormat3(BlogPosts)
   implicit val postComments = jsonFormat4(PostComments)
   implicit val putPostFormat = jsonFormat2(PutPost)
   implicit val patchPost = jsonFormat2(PatchPost)
+  implicit val putComment = jsonFormat3(PutComment)
 }
 
 /**
@@ -126,6 +144,18 @@ object BlogServer extends App with BlogProtocol with BlogStore {
       patch {
         entity(as[PatchPost]) { patchPost =>
           complete(updatePost(id, patchPost.title, patchPost.content))
+        }
+      } ~
+      path("comment") {
+        put {
+          entity(as[PutComment]) { pc =>
+            complete(createComment(id, pc.author, pc.title, pc.content))
+          }
+        }
+      } ~
+      path("comment" / Segment) { commentId =>
+        delete {
+          complete(deleteComment(id, commentId))
         }
       }
     }
