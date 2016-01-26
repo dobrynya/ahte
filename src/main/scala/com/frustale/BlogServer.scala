@@ -2,13 +2,14 @@ package com.frustale
 
 import java.time._
 import java.time.format.DateTimeFormatter
-import java.util.UUID
+import java.util.{UUID}
 import akka.actor.ActorSystem
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.marshallers.sprayjson.SprayJsonSupport
 import akka.http.scaladsl.server.Directives._
 import akka.stream.ActorMaterializer
 import spray.json._
+import math.Ordering
 
 case class Blog(name: String, author: String)
 
@@ -32,15 +33,18 @@ case class Comment(author: String, title: String, content: String, created: Loca
 
 trait BlogStore {
   var blog = Blog("Dmitry's blog", "Dmitry")
-
-  var posts = {
-    val post = Post("First post", LocalDateTime.now, "Content with four sentences. The second one. The third! The fourth?")
-    Map(post.id -> post)
-  }
-
+  var posts = Map.empty[String, Post]
   var comments = Map.empty[String, List[Comment]]
 
-  def blogPosts = BlogPosts(blog.name, blog.author, posts.values.map(_.only3Sentences).toList)
+  implicit val dateOrdering = new Ordering[LocalDateTime] {
+    override def compare(x: LocalDateTime, y: LocalDateTime): Int = x.compareTo(y)
+  }
+
+  def blogPosts(start: Option[Int]) = {
+    BlogPosts(blog.name, blog.author,
+      posts.values.map(_.only3Sentences).toList.sortBy(p => p.modified.getOrElse(p.created))
+        .drop(start.getOrElse(0)).take(5))
+  }
 
   def createPost(title: String, content: String): Post = {
     val post = Post(title, LocalDateTime.now, content)
@@ -49,9 +53,9 @@ trait BlogStore {
   }
 
   def updatePost(id: String, title: Option[String], content: Option[String]): Option[Post] =
-    for (old <- posts.get(id))
-    yield {
-      val post = old.copy(title = title.getOrElse(old.title), content = content.getOrElse(old.content))
+    for (old <- posts.get(id)) yield {
+      val post = old.copy(title = title.getOrElse(old.title), content = content.getOrElse(old.content),
+        modified = Some(LocalDateTime.now))
       posts += post.id -> post
       post
     }
@@ -76,12 +80,14 @@ trait BlogStore {
   def deletePost(id: String): Option[Post] =
     for (old <- posts.get(id)) yield {
       posts -= id
+      comments -= id
       old
     }
 
-  def postComments(id: String): Option[PostComments] =
+  def postComments(id: String, start: Option[Int]): Option[PostComments] =
     for (post <- posts.get(id))
-    yield PostComments(blog.name, blog.author, post.title, comments.getOrElse(id, Nil).reverse)
+    yield PostComments(blog.name, blog.author, post.title,
+      comments.getOrElse(id, Nil).reverse.drop(start.getOrElse(0)).take(5))
 }
 
 case class BlogPosts(name: String, author: String, posts: List[Post])
@@ -122,13 +128,8 @@ object BlogServer extends App with BlogProtocol with BlogStore {
   implicit val ec = system.dispatcher
 
   val route =
-    pathEndOrSingleSlash {
-      get {
-        complete(blogPosts)
-      }
-    } ~
-    put {
-      path("/post") {
+    path("post") {
+      put {
         entity(as[PutPost]) { post =>
           complete(createPost(post.title, post.content))
         }
@@ -136,7 +137,9 @@ object BlogServer extends App with BlogProtocol with BlogStore {
     } ~
     path("post" / Segment) { id =>
       get {
-        complete(postComments(id))
+        optionalHeaderValueByName("start") { start =>
+          complete(postComments(id, start.map(_.toInt)))
+        }
       } ~
       delete {
         complete(deletePost(id))
@@ -145,26 +148,33 @@ object BlogServer extends App with BlogProtocol with BlogStore {
         entity(as[PatchPost]) { patchPost =>
           complete(updatePost(id, patchPost.title, patchPost.content))
         }
-      } ~
-      path("comment") {
-        put {
-          entity(as[PutComment]) { pc =>
-            complete(createComment(id, pc.author, pc.title, pc.content))
-          }
+      }
+    } ~
+    path("post" / Segment / "comment") { id =>
+      put {
+        entity(as[PutComment]) { pc =>
+          complete(createComment(id, pc.author, pc.title, pc.content))
         }
-      } ~
-      path("comment" / Segment) { commentId =>
-        delete {
-          complete(deleteComment(id, commentId))
+      }
+    } ~
+    path("post" / Segment / "comment" / Segment) {(postId, commentId) =>
+      delete {
+        complete(deleteComment(postId, commentId))
+      }
+    } ~
+    pathSingleSlash {
+      get {
+        optionalHeaderValueByName("start") { start =>
+          complete(blogPosts(start.map(_.toInt)))
         }
       }
     }
 
   val bindingFuture = Http().bindAndHandle(route, "0.0.0.0", 8080)
 
-  println(s"Server online at http://localhost:8080/\nPress RETURN to stop...")
-  io.StdIn.readLine() // for the future transformations
+  println("Server online at http://localhost:8080/\nPress RETURN to stop...")
+  io.StdIn.readLine()
   bindingFuture
-    .flatMap(_.unbind()) // trigger unbinding from the port
-    .onComplete(_ ⇒ system.shutdown()) // and shutdown when done
+    .flatMap(_.unbind())
+    .onComplete(_ ⇒ system.shutdown())
 }
